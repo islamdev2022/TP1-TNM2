@@ -20,6 +20,9 @@ class ImageProcessorGUI:
         self.image_path = None
         self.original_image = None
         self.processed_image = None
+        self.Y = None
+        self.Cb = None
+        self.Cr = None
 
         self.setup_gui()
 
@@ -44,16 +47,16 @@ class ImageProcessorGUI:
         mode_frame = ctk.CTkFrame(main_frame)
         mode_frame.pack(pady=10)
         
-        ctk.CTkLabel(mode_frame, text="Sampling Mode:").pack()
+        ctk.CTkLabel(mode_frame, text="Échantillonnage:").pack()
         
-        self.mode_var = ctk.StringVar(value="4:4:4")
-        modes = ["4:4:4", "4:4:2", "4:2:2"]
-        for mode in modes:
+        self.mode_var = ctk.StringVar(value="1")
+        modes = [("4:4:4", "1"), ("4:2:2", "2"), ("4:2:0", "3")]
+        for text, value in modes:
             ctk.CTkRadioButton(
                 mode_frame, 
-                text=mode, 
+                text=f"{value}={text}", 
                 variable=self.mode_var, 
-                value=mode
+                value=value
             ).pack(pady=5)
 
         # Process button
@@ -98,62 +101,63 @@ class ImageProcessorGUI:
             self.process_button.configure(state="normal")
 
     def rgb_to_ycrcb(self, image):
-        """
-        Convert RGB image to YCrCb color space
-        Uses standard conversion matrix for color space transformation
-        """
+        """Convert RGB image to YCrCb color space"""
         transform_matrix = np.array([
-            [0.299, 0.587, 0.114],      # Y component
-            [-0.168736, -0.331264, 0.5], # Cb component
-            [0.5, -0.418688, -0.081312]  # Cr component
+            [0.299, 0.587, 0.114],
+            [-0.168736, -0.331264, 0.5],
+            [0.5, -0.418688, -0.081312]
         ])
-
         img_array = np.array(image, dtype=np.float32)
         R, G, B = img_array[:, :, 0], img_array[:, :, 1], img_array[:, :, 2]
 
-        # Calculate YCrCb components
         Y = transform_matrix[0, 0] * R + transform_matrix[0, 1] * G + transform_matrix[0, 2] * B
         Cb = transform_matrix[1, 0] * R + transform_matrix[1, 1] * G + transform_matrix[1, 2] * B + 128
         Cr = transform_matrix[2, 0] * R + transform_matrix[2, 1] * G + transform_matrix[2, 2] * B + 128
 
-        return np.stack((Y, Cb, Cr), axis=-1).astype(np.uint8)
-
-    def downsample(self, ycrcb_image, mode):
-        """
-        Perform chroma subsampling based on selected mode
-        4:4:4 - No subsampling
-        4:4:2 - Vertical subsampling
-        4:2:2 - Horizontal subsampling
-        """
-        Y, Cb, Cr = ycrcb_image[:, :, 0], ycrcb_image[:, :, 1], ycrcb_image[:, :, 2]
-        if mode == "4:4:2":
-            Cb = Cb[::2, :]  # Vertical subsampling
-            Cr = Cr[::2, :]
-        elif mode == "4:2:2":
-            Cb = Cb[:, ::2]  # Horizontal subsampling
-            Cr = Cr[:, ::2]
-
         return Y, Cb, Cr
 
+    def downsample(self, Y, Cb, Cr, mode):
+        """Downsample Cb and Cr components based on mode"""
+        if mode == "2":  # 4:2:2
+            Cb = Cb[:, ::2]
+            Cr = Cr[:, ::2]
+        elif mode == "3":  # 4:2:0
+            Cb = Cb[::2, ::2]
+            Cr = Cr[::2, ::2]
+        return Y, Cb, Cr
+
+    def upsample(self, Cb, Cr, mode):
+        """Upsample Cb and Cr components back to original size"""
+        if mode == "2":  # 4:2:2
+            Cb = np.repeat(Cb, 2, axis=1)
+            Cr = np.repeat(Cr, 2, axis=1)
+        elif mode == "3":  # 4:2:0
+            Cb = np.repeat(np.repeat(Cb, 2, axis=0), 2, axis=1)
+            Cr = np.repeat(np.repeat(Cr, 2, axis=0), 2, axis=1)
+        return Cb, Cr
+
+    def ycrcb_to_rgb(self, Y, Cb, Cr):
+        """Convert YCrCb back to RGB color space"""
+        Cb_temp = Cb - 128
+        Cr_temp = Cr - 128
+        
+        inv_transform = np.array([
+            [1, 0, 1.402],
+            [1, -0.344136, -0.714136],
+            [1, 1.772, 0]
+        ])
+
+        R = inv_transform[0, 0] * Y + inv_transform[0, 2] * Cr_temp
+        G = inv_transform[1, 0] * Y + inv_transform[1, 1] * Cb_temp + inv_transform[1, 2] * Cr_temp
+        B = inv_transform[2, 0] * Y + inv_transform[2, 1] * Cb_temp
+
+        rgb_image = np.clip(np.stack((R, G, B), axis=-1), 0, 255).astype(np.uint8)
+        return rgb_image
+
     def psnr(self, original, compressed):
-        """Calculate Peak Signal-to-Noise Ratio between original and compressed images"""
+        """Calculate Peak Signal-to-Noise Ratio"""
         mse = np.mean((original.astype(np.float32) - compressed.astype(np.float32)) ** 2)
         return 10 * np.log10(255 ** 2 / mse) if mse != 0 else float('inf')
-
-    def show_images(self, original, transformed, title):
-        """Display original and processed images side by side"""
-        plt.close('all')  # Close any existing plots
-        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-        
-        axes[0].imshow(original)
-        axes[0].set_title("Original Image (RGB)")
-        axes[0].axis("off")
-
-        axes[1].imshow(transformed, cmap='gray' if len(transformed.shape) == 2 else None)
-        axes[1].set_title(title)
-        axes[1].axis("off")
-
-        plt.show()
 
     def process_image(self):
         """Process the selected image with the chosen sampling mode"""
@@ -162,37 +166,75 @@ class ImageProcessorGUI:
 
         # Load and convert image
         self.original_image = Image.open(self.image_path).convert("RGB")
-        ycrcb_image = self.rgb_to_ycrcb(self.original_image)
-
+        Y, Cb, Cr = self.rgb_to_ycrcb(self.original_image)
+        
         mode = self.mode_var.get()
         original_size = self.original_image.size[0] * self.original_image.size[1] * 3
 
-        # Process image based on selected mode
-        if mode == "4:4:4":
-            self.processed_image = ycrcb_image
-            processed_size = original_size
-        else:
-            Y, Cb, Cr = self.downsample(ycrcb_image, mode)
-            processed_size = Y.size + Cb.size + Cr.size
-            self.processed_image = np.stack((
-                Y,
-                np.repeat(Cb, 2, axis=0) if mode == "4:4:2" else np.repeat(Cb, 2, axis=1),
-                np.repeat(Cr, 2, axis=0) if mode == "4:4:2" else np.repeat(Cr, 2, axis=1)
-            ), axis=-1)
+        # Downsample
+        Y_down, Cb_down, Cr_down = self.downsample(Y, Cb, Cr, mode)
+        compressed_size = Y_down.size + Cb_down.size + Cr_down.size
 
-        # Calculate and display metrics
-        conversion_rate = original_size / processed_size
-        psnr_value = self.psnr(ycrcb_image, self.processed_image)
+        # Upsample
+        Cb_up, Cr_up = self.upsample(Cb_down, Cr_down, mode)
+        
+        # Reconstruct RGB
+        self.processed_image = self.ycrcb_to_rgb(Y_down, Cb_up, Cr_up)
+        
+        # Store YCbCr components
+        self.Y = Y
+        self.Cb = Cb
+        self.Cr = Cr
 
+        # Calculate metrics
+        psnr_value = self.psnr(np.array(self.original_image), self.processed_image)
+        conversion_rate = original_size / compressed_size if mode != "1" else 1
+
+        # Update labels
         self.size_label.configure(
-            text=f"Original size: {original_size} pixels\nProcessed size: {processed_size} pixels"
+            text=f"Original size: {original_size} pixels\nProcessed size: {compressed_size} pixels"
         )
         self.conv_label.configure(text=f"Conversion rate: {conversion_rate:.2f}")
         self.psnr_label.configure(text=f"PSNR: {psnr_value:.2f} dB")
 
-        # Show images and enable save button
-        self.show_images(self.original_image, self.processed_image, f"YCrCb Image ({mode})")
+        # Display images
         self.save_button.configure(state="normal")
+        self.display_images()
+
+    def display_images(self):
+        """Display all images in the required format"""
+        plt.close('all')
+        
+        # Create figure with subplots
+        fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+        
+        # Display images in first row
+        axes[0, 0].imshow(self.original_image)
+        axes[0, 0].set_title("Image Originale (RGB)")
+        axes[0, 0].axis("off")
+
+        axes[0, 1].imshow(self.processed_image)
+        axes[0, 1].set_title("Image RGB Reconstituée")
+        axes[0, 1].axis("off")
+
+        axes[0, 2].imshow(self.Cb, cmap='gray')
+        axes[0, 2].set_title("Canal Cb")
+        axes[0, 2].axis("off")
+
+        # Display images in second row
+        axes[1, 0].imshow(self.Cr, cmap='gray')
+        axes[1, 0].set_title("Canal Cr")
+        axes[1, 0].axis("off")
+
+        axes[1, 1].imshow(self.Y, cmap='gray')
+        axes[1, 1].set_title("Canal Y")
+        axes[1, 1].axis("off")
+
+        # Remove the unused subplot
+        fig.delaxes(axes[1, 2])
+
+        plt.tight_layout()
+        plt.show()
 
     def save_image(self):
         """Save the processed image"""
@@ -202,7 +244,7 @@ class ImageProcessorGUI:
                 filetypes=[("BMP files", "*.bmp")]
             )
             if save_path:
-                Image.fromarray(self.processed_image.astype(np.uint8)).save(save_path)
+                Image.fromarray(self.processed_image).save(save_path)
 
     def run(self):
         """Start the GUI application"""
